@@ -1,0 +1,2 @@
+/workspace/scratch/f441f02684ee/eeg_spatial_tuning/predict_tuning.py:12: UserWarning: Training participant overlap: these predictions are not independent accuracy
+  if set(spatial.subject_id)&set(b['training_subject_ids']):warnings.warn('Training participant overlap: these predictions are not independent accuracy')

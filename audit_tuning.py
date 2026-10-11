@@ -1,0 +1,31 @@
+"""Independent fixed-split verification and paired participant uncertainty."""
+import argparse,json
+from pathlib import Path
+import pandas as pd,numpy as np
+from sklearn.metrics import balanced_accuracy_score
+
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--out',default='eeg_spatial_tuning/results');p.add_argument('--reference',default='eeg_original_v3/results');a=p.parse_args();out=Path(a.out);ref=Path(a.reference);d=pd.read_csv(out/'predictions.csv');old=pd.read_csv(ref/'all_oof_predictions.csv');old=old[old.task.eq('subject')&old.suite.eq('spatial_only')];metrics=json.loads((out/'metrics.json').read_text());splits=json.loads((out/'splits.json').read_text());lookup={(s['seed'],s['fold']):s for s in splits};logs=pd.read_csv(out/'inner_scores.csv')
+ assert json.loads((out/'inputs.json').read_text())['source_sha256']==json.loads((ref/'inputs.json').read_text())['source_sha256']
+ for r in metrics['results']:
+  v=d[d.suite.eq(r['suite'])&d.seed.eq(r['seed'])];assert len(v)==20 and not v.subject_id.duplicated().any();assert np.isclose(balanced_accuracy_score(v.group,v.prediction),r['balanced_accuracy'])
+  for fold,w in v.groupby('fold'):
+   s=lookup[(r['seed'],fold)];assert not set(s['training_subjects'])&set(s['validation_subjects']);assert set(w.subject_id)==set(s['validation_subjects']);assert set(w.subject_id)==set(old[old.seed.eq(r['seed'])&old.fold.eq(fold)].subject_id)
+ baseline=d[d.suite.eq('original_spatial')].merge(old,on=['subject_id','seed','fold'],suffixes=('_new','_old'),validate='one_to_one');assert len(baseline)==60;assert baseline.prediction_new.eq(baseline.prediction_old).all()
+ for _,r in logs.iterrows():
+  train=set(r.training_subjects.split(','));valid=set(r.validation_subjects.split(','));assert not train&valid
+  if str(r.outer_fold)!='final':
+   s=lookup[(int(r.seed),int(r.outer_fold))];assert not (train|valid)&set(s['validation_subjects']);assert (train|valid)==set(s['training_subjects'])
+ (out/'audit.json').write_text(json.dumps({'scores_recomputed':len(metrics['results']),'inner_records_checked':len(logs),'original_spatial_predictions_reproduced':len(baseline),'original_data_and_splits_match':True},indent=2))
+ summary=pd.DataFrame(metrics['results'])[['suite','seed','balanced_accuracy','macro_f1']];summary.to_csv(out/'accuracy_by_seed.csv',index=False);table=summary.groupby('suite').balanced_accuracy.agg(['mean','min','max']).reset_index();table.to_csv(out/'summary.csv',index=False)
+ scores=d.assign(correct=d.group.eq(d.prediction)).groupby(['subject_id','group','suite']).correct.mean().unstack('suite');rng=np.random.default_rng(183);g=scores.index.get_level_values('group');intervals=[]
+ for suite in ['covariance_only','correlation_only','adjusted_selection']:
+  delta=scores[suite]-scores.original_spatial;values=[delta.iloc[np.concatenate([rng.choice(np.flatnonzero(g==c),sum(g==c),replace=True) for c in sorted(set(g))])].mean() for _ in range(2000)];lo,hi=np.quantile(values,[.025,.975]);intervals.append({'suite':suite,'change':delta.mean(),'low':lo,'high':hi})
+ pd.DataFrame(intervals).to_csv(out/'paired_intervals.csv',index=False)
+ text=['# Broadband spatial adjustments','','Original dataset unchanged: 20 participants, 600 trials. This experiment concerns alcoholic/control participant classification only. The stimulus model is unchanged.','','## Results','','| Selection family | Mean across three splits | Range |','|---|---:|---:|']
+ for _,r in table.iterrows():text.append(f'| {r.suite} | {r["mean"]*100:.2f}% | {r["min"]*100:.2f}–{r["max"]*100:.2f}% |')
+ text+=['','## Paired change versus original spatial family','','| Family | Mean change | Participant bootstrap interval |','|---|---:|---:|']
+ for r in intervals:text.append(f'| {r["suite"]} | {r["change"]*100:+.2f} points | {r["low"]*100:+.2f} to {r["high"]*100:+.2f} points |')
+ text+=['','Three seeds reuse the same participants; they are not independent replications. Bootstrap averages each participant across seeds before resampling within alcoholic/control groups. Intervals are exploratory, do not account for retraining on new cohorts, and are not corrected for multiple comparisons. Repeated examination of this cohort limits claims of generalization.','','## Fixed adjustments','','Eighteen candidates were specified before evaluation. They compare log covariance versus log correlation, mean/median/10%-trimmed feature aggregation per participant and condition, PCA with 3/6/9 components, and logistic C values 0.01/0.1. It is a limited grid, not a full factorial design; see candidate_plan.json for every combination. Larger C means weaker regularization. Original three candidates retain their original ordering for tie-breaking.','','Every pipeline uses training-fold imputation, variance removal, scaling, PCA and logistic fitting. Candidate selection uses three inner participant folds; evaluation uses five outer participant folds for seeds 183/184/185. Covariance-only/correlation-only are separate nested selection experiments, not replacements chosen after looking at test scores. Robust aggregation trims each feature independently; it does not remove source trials.','','Spatial extraction is the original 1–40 Hz OAS log covariance/correlation method with 61 scalp channels and the inherited 256 Hz assumption. X/Y/nd are excluded from spatial features only. Stimulus onset remains unverified.','','## Checks and artifacts','',f'All {len(metrics["results"])} reported scores were recomputed. All {len(logs)} inner records were checked for overlap and contamination. All 60 original spatial predictions reproduce exactly. Comparison and all-data final refits took {metrics["seconds_including_final_refits"]:.1f} seconds, excluding extraction.','','Saved original_spatial_model.joblib and adjusted_selection_model.joblib use all-participant inner selection followed by all-data refits. Their fits have no independent test score. Probabilities remain uncalibrated. Individual candidate predictions are included for diagnosis only; ranking them after viewing outer scores would be further test-set tuning.']
+ (out.parent/'RESULTS.md').write_text('\n'.join(text));print(table.to_string(index=False));print(pd.DataFrame(intervals).to_string(index=False))
+if __name__=='__main__':main()
